@@ -1,0 +1,23 @@
+# A --patch overlay mounting @codebam/dsh-tool-viewport from this checkout:
+#
+#   node scripts/link-dsh-peers.mjs          # once, links the @deepseek-ai/* peers
+#   dsh tui --patch ./examples/mount.yml     # or: dsh headless --patch ... "task"
+#
+# Inside a session, the defaults are already right and the config block can
+# be `{}` — `viewport msg` and grim both find the session from the harness's
+# own environment (VIEWPORT_SOCKET / XDG_RUNTIME_DIR / WAYLAND_DISPLAY). The
+# values below pin every path explicitly; this is the shape used to test
+# against a throwaway `viewport --headless` instance (see
+# scripts/headless-smoke.sh) so trying the tool cannot touch the live
+# session.
+- insert:
+    - id: tool-viewport
+      name: /home/codebam/Documents/git/dsh-tool-viewport/index.mjs
+      config:
+        # executable: /run/current-system/sw/bin/viewport   # the session's own binary
+        executable: /home/codebam/Documents/git/Viewport/target/debug/viewport
+        socket: /tmp/vp-smoke/viewport-wayland-1.sock
+        runtimeDir: /tmp/vp-smoke
+        waylandDisplay: wayland-1
+        grim: /etc/profiles/per-user/codebam/bin/grim
+        screenshotDir: /tmp/vp-shots

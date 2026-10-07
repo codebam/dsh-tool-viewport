@@ -1,0 +1,67 @@
+{
+  "name": "@codebam/dsh-tool-viewport",
+  "version": "0.1.0",
+  "description": "Model-facing `viewport` tool for the DeepSeek Harness: screenshot, pointer, wheel and keyboard control of a live Viewport session through its control socket.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "viewport",
+    "wayland",
+    "compositor",
+    "screenshot",
+    "grim",
+    "input",
+    "automation",
+    "tool",
+    "plugin",
+    "cordis",
+    "agent"
+  ],
+  "license": "MIT",
+  "author": "Sean Behan",
+  "homepage": "https://github.com/codebam/dsh-tool-viewport#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codebam/dsh-tool-viewport.git"
+  },
+  "bugs": {
+    "url": "https://github.com/codebam/dsh-tool-viewport/issues"
+  },
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "check": "for f in index.mjs src/*.mjs scripts/*.mjs test/*.mjs; do node --check \"$f\" || exit 1; done",
+    "peers": "node scripts/link-dsh-peers.mjs",
+    "test": "node --test",
+    "test:local": "node scripts/link-dsh-peers.mjs && node --test",
+    "pack:check": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/dsh-llm": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true },
+    "@deepseek-ai/schemastery": { "optional": true }
+  }
+}

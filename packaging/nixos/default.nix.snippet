@@ -1,0 +1,7 @@
+# Add inside pkgs/default.nix, next to the dsh and dsh-tool-nu entries:
+
+  # dsh's model-facing Viewport tool. It drives the compositor through the
+  # session's own `viewport msg` client (the only client the control socket
+  # trusts for synthetic input) and captures through grim; home/agents.nix
+  # copies it into $DSH_HOME next to the profile's node_modules.
+  dsh-tool-viewport = pkgs.callPackage ./dsh-tool-viewport.nix { };
