@@ -15,11 +15,11 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { basename } from 'node:path'
 import { canonicalChord, chordMessages, typeText } from './keys.mjs'
 import { BUTTON_CODES, buttonMessage, pointerMessage, scrollMessage } from './messages.mjs'
-import { screenshotSummary, scrollPhrase, typeSummary } from './render.mjs'
+import { releaseSummary, screenshotSummary, scrollPhrase, typeSummary } from './render.mjs'
 import { abortError } from './seat.mjs'
 
 /** Every action the tool offers. */
-export const ACTIONS = ['screenshot', 'move', 'click', 'scroll', 'type', 'key']
+export const ACTIONS = ['screenshot', 'move', 'click', 'scroll', 'type', 'key', 'release']
 
 /** One call types at most this much; 2000 characters is 4000 messages already. */
 export const MAX_TYPE_LENGTH = 2000
@@ -73,7 +73,9 @@ export function viewportDescription() {
     '',
     'Coordinates are layout pixels on the whole desktop: the same pixels as the screenshot, (0, 0) at its top-left corner. `scroll` counts wheel notches, positive up (`dy`) and right (`dx`); one notch is one detent of a wheel.',
     '',
-    'Actions: `screenshot` captures the whole desktop and returns the image; `move` puts the pointer at (x, y); `click` presses and releases a button (`left`, `right`, `middle`) at the pointer, or at (x, y) in one step; `scroll` turns the wheel by (dx, dy) notches, optionally moving to (x, y) first; `type` types text, with `\\n` for Return; `key` presses one named key (`Return`, `Escape`, `Tab`, arrows, `F5`, …) or a `+` chord (`ctrl+c`, `ctrl+shift+t`).',
+    'Actions: `screenshot` captures the whole desktop and returns the image; `move` puts the pointer at (x, y); `click` presses and releases a button (`left`, `right`, `middle`) at the pointer, or at (x, y) in one step; `scroll` turns the wheel by (dx, dy) notches, optionally moving to (x, y) first; `type` types text, with `\\n` for Return; `key` presses one named key (`Return`, `Escape`, `Tab`, arrows, `F5`, …) or a `+` chord (`ctrl+c`, `ctrl+shift+t`); `release` lets go of every key and button the plugin can leave held, and is safe when nothing is held.',
+    '',
+    'Input calls are serialized one at a time. If a call fails or is cancelled part-way, the keys and buttons it had pressed are released before the error comes back, and the error says what was released; `release` is the manual escape hatch if one is still stuck.',
     '',
     'This needs a running Viewport session; a refused or unanswered message is reported as an error, in the client\'s own words.',
   ].join('\n')
@@ -142,6 +144,9 @@ export function validateViewportArgs(args) {
       }
       break
     }
+    case 'release':
+      // No coordinates and no fields: the sweep is the whole point.
+      break
     default:
       throw new Error(`unknown action ${JSON.stringify(action)}`)
   }
@@ -193,6 +198,9 @@ function presentCall(args) {
       }
       case 'key':
         title = typeof args.key === 'string' && args.key.length > 0 ? `Press ${args.key}` : 'Press a key'
+        break
+      case 'release':
+        title = 'Release every held key and button'
         break
       default:
         title = `Viewport ${typeof args?.action === 'string' ? args.action : ''}`.trim()
@@ -353,6 +361,10 @@ export function mountViewportTool(ctx, options) {
           const label = canonicalChord(args.key)
           await seat.run(messages, exec.signal)
           return { action: 'key', summary: `Pressed ${label}.` }
+        }
+        case 'release': {
+          const result = await seat.releaseAll(exec.signal)
+          return { action: 'release', summary: releaseSummary(result) }
         }
         default:
           throw new Error(`unknown action ${JSON.stringify(args.action)}`)

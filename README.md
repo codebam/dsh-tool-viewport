@@ -19,10 +19,18 @@ One tool, `viewport`, one action per call, all through the trusted
 | `scroll` | Turns the wheel by `(dx, dy)` notches — positive up, positive right. Moves to `(x, y)` first when given. |
 | `type` | Types text: `\n` is Return, `\t` is Tab. Up to 2000 characters per call. |
 | `key` | Presses one named key (`Return`, `Escape`, `Tab`, arrows, `F5`, …), a single character, or a `+` chord (`ctrl+c`, `ctrl+shift+t`). |
+| `release` | Lets go of every key and button the plugin may still be holding — the seat's ledger plus the standard modifier/mouse-button set — and reports what it released. Safe when nothing is held (the summary says so); the manual escape hatch. |
 
 The tool's description tells the model the same thing the rest of this
 document tells you: this drives the session a person is sitting at, so
 `screenshot` first, act on what the image shows, screenshot again to check.
+
+Input calls are serialized through one FIFO queue, and a call that fails or
+is cancelled part-way releases the keys and buttons it had pressed before
+the error comes back. What that does and does not guarantee — timeouts,
+aborts, queued cancellation, `release`, and the cases that are deliberately
+out of scope (SIGKILL, a dead compositor, a second dsh process) — is in
+[`docs/input-safety.md`](docs/input-safety.md).
 
 ## Requirements
 
@@ -89,6 +97,13 @@ string) run as one `sh` script of sequential invocations, each waiting for
 the acceptance barrier before the next; a refusal stops the batch and the
 model reads the client's own words.
 
+The batch runs in its own process group, so a timeout or abort kills the
+whole tree rather than just the shell, and a progress marker records how
+many messages completed. Compensation then releases exactly what the batch
+had pressed, last press first, each release as its own `viewport msg`; the
+error says what was released (or that nothing was held). See
+[`docs/input-safety.md`](docs/input-safety.md).
+
 Typing and key chords go through the `osk.key` path — every key down and
 up as its own message, exactly the sequence the shell's on-screen keyboard
 sends (`data/shell/osk.js` in the Viewport repository is the reference:
@@ -102,11 +117,13 @@ and `input.scroll`.
 index.mjs              the Cordis plugin entry: config schema, service wiring, system prompt
 src/messages.mjs       control-message building (`-t <type>` plus fields per action)
 src/keys.mjs           text and chords to keystrokes (the osk.js mapping)
-src/seat.mjs           message lists to `viewport msg` runs; batch scripts; error shaping
+src/held.mjs           held-key/button accounting over a message list; release planning
+src/seat.mjs           FIFO queue, process groups, compensation, batch scripts, error shaping
 src/shot.mjs           grim capture, PNG sizing, screenshot naming
 src/render.mjs         model-facing summaries (screenshot envelope matches read_image's)
 src/tool.mjs           the `viewport` tool definition (schema, validation, execution)
 test/                  node --test suites over all of the above (fake clients; no session needed)
+docs/input-safety.md   the guarantees, the ordering, and what is out of scope
 scripts/               link-dsh-peers.mjs; smoke-e2e.mjs + headless-smoke.sh (below)
 examples/mount.yml     the --patch overlay
 packaging/nixos/       the NixOS packaging
@@ -114,8 +131,9 @@ packaging/nixos/       the NixOS packaging
 
 ## Testing
 
-- `node --test` — the unit suites (55 tests). No session, no compositor:
-  fake clients stand in for `viewport msg` and grim.
+- `node --test` — the unit suites (89 tests). No session, no compositor:
+  fake clients stand in for `viewport msg` and grim, including the
+  refusable/hanging/slow clients behind the input-safety tests.
 - `scripts/headless-smoke.sh` — the real thing, against a throwaway
   `viewport --headless` instance: starts it, then runs the same modules
   end to end (`move`, `click`, `scroll`, `type`, `key`, `screenshot` with

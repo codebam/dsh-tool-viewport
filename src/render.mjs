@@ -9,6 +9,7 @@
  *
  * @module @codebam/dsh-tool-viewport/render
  */
+import { RELEASABLE_INPUTS, describeInputs } from './held.mjs'
 
 /** `3840x2160` */
 export function dimensions(width, height) {
@@ -86,4 +87,28 @@ export function typeSummary(text) {
 /** `Clicked the left button at (100, 200).` or `Moved the pointer to (100, 200).` */
 export function pointerSummary(verb, x, y, suffix = '') {
   return `${verb} (${coordinate(x)}, ${coordinate(y)})${suffix}.`
+}
+
+/**
+ * The `release` action's one line: what the ledger knew about, and what the
+ * sweep could and could not let go. It says plainly when nothing was known
+ * to be held, because that is the ordinary, safe case — the release
+ * messages are no-ops then.
+ * @param {{ known: Array<object>, released: Array<object>, failed: Array<{ input: object, reason: string }> }} result - the seat's release report.
+ * @returns {string} the summary.
+ */
+export function releaseSummary({ known, released, failed }) {
+  if (failed.length > 0) {
+    const failedNames = describeInputs(failed.map((entry) => entry.input))
+    const reason = failed[0].reason
+    const stillHeld = failed.length === 1 ? 'it may still be held' : 'they may still be held'
+    if (released.length === 0) {
+      return `Could not release ${failedNames} (${reason}); ${stillHeld}.`
+    }
+    return `Released ${describeInputs(released)}; could not release ${failedNames} (${reason}); ${stillHeld}.`
+  }
+  if (known.length === 0) {
+    return `Nothing was known to be held; released every key and button the plugin can leave held (${describeInputs(RELEASABLE_INPUTS)}) as a safety net.`
+  }
+  return `Released ${describeInputs(known)} (and swept the standard modifier and button set); nothing is left held.`
 }
