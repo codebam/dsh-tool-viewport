@@ -81,8 +81,8 @@ case used for testing against a throwaway instance.
 ### Durable — NixOS, the way `dsh-tool-nu` is packaged
 
 `packaging/nixos/` carries the three pieces, mirroring that plugin:
-`dsh-tool-viewport.nix` (the derivation; the hash is a placeholder until a
-`v0.1.0` tag is pushed), `default.nix.snippet` (the `pkgs` entry) and
+`dsh-tool-viewport.nix` (the derivation; its hash pins the pushed `v0.2.0`
+tag), `default.nix.snippet` (the `pkgs` entry) and
 `agents.nix.snippet` (the home-manager copy into
 `$DSH_HOME/profiles/viewport-tool/` next to the shared `node_modules`
 symlink, plus the profile patch row). See `packaging/README.md`.

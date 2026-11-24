@@ -20,11 +20,11 @@ resolves `@deepseek-ai/dsh-tools` and friends from the plugin's own
 
 Three files, mirroring that plugin's packaging:
 
-- `nixos/dsh-tool-viewport.nix` — the derivation. **Its `hash` is a
-  placeholder**: it pins a `v0.1.0` tag that does not exist yet. Push the
-  tag, compute the unpacked-tree hash
-  (`nix-prefetch-url --unpack <tag tarball>`, converted to SRI), and fill
-  it in.
+- `nixos/dsh-tool-viewport.nix` — the derivation. Its `hash` is the
+  pushed tag's unpacked-tree hash
+  (`nix-prefetch-url --unpack <tag tarball>`, converted to SRI). To cut a
+  release, push the tag, recompute the hash, and update `version`, `rev`
+  and `hash` together.
 - `nixos/default.nix.snippet` — the `pkgs` entry (`callPackage`).
 - `nixos/agents.nix.snippet` — the home-manager pieces: Part A copies the
   plugin into `$DSH_HOME/profiles/viewport-tool/` next to the shared
