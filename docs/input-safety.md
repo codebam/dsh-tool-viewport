@@ -7,8 +7,12 @@ every other application. This document says exactly what the plugin
 guarantees, how it keeps those promises, and what it deliberately does not
 promise.
 
-Everything below is about the `viewport` tool's own process. Screenshots
-(`grim`) never hold input and are not part of the input queue.
+Most of what follows is about the `viewport` tool's own process: its queue,
+its ledger, and its compensation. The one thing a single process cannot do is
+stop a second dsh process from interleaving input on the same socket; a
+per-socket advisory lease, described below, closes that gap without pretending
+it can see the other process's held keys. Screenshots (`grim`) never hold input
+and are not part of the input queue.
 
 ## The problem, in one paragraph
 
@@ -46,6 +50,9 @@ which is what compensation uses.
 | The call is **aborted** while its batch is running | Same as a timeout: group killed, compensation run on its own budget, and only then does the `AbortError` reach the model. The abort signal is deliberately ignored during compensation — cancelling must not leave a key down. |
 | The call is **aborted while queued** | It never starts: no message, no release, no spawn. It rejects promptly and is removed from the queue. |
 | Two tool calls run **concurrently** | They are serialized through one FIFO queue per seat. One call's messages are contiguous; no two calls interleave. A failed, refused or aborted call never wedges the queue, and the next call starts only after compensation has finished. |
+| A **second dsh process** drives the same socket, resolving the same target and lease directory | They are serialized by a per-socket lease: only one process's batch is in flight at a time. The other waits (abortably) up to `leaseWaitMs` (30 s by default), then gets a `LeaseError` naming the holder and the lock file. The lease is taken before the first message and given back after compensation. |
+| The lease holder is **SIGKILLed** or exits without releasing | The next call reads the recorded identity (pid plus `/proc/<pid>/stat` field 22, the process start time), finds it provably gone — pid gone, a later process with the same pid and a different start time, or a zombie — and reclaims the lease before its first message. |
+| The lease file is **stale, released or garbled** | A provably dead identity, or a release tombstone, is reclaimed at once; a garbled file after a one-second grace. Reclamation runs under a guard that re-checks the exact bytes before unlinking, so a fresh holder's record is never the bytes that were inspected. A file whose owner cannot be read is never stolen: the call waits out its bound and reports it. |
 | Input is stuck and the model calls **`release`** | Every input the seat's ledger still counts as possibly down is released, last press first, followed by the standard modifier and button set (`ctrl`, `alt`, `shift`, `super`, left, right, middle). Each release is its own `viewport msg`, so one refusal cannot stop the sweep; refusals are reported in the summary and the input stays in the ledger for a retry. |
 | `release` is called when **nothing is held** | The releases are no-ops; the summary says nothing was known to be held. It is safe and idempotent. |
 
@@ -108,8 +115,9 @@ It keeps an in-memory ledger of inputs it has pressed and not confirmed
 released: a successful batch applies its full press/release trace; a failed
 batch applies the prefix it knows ran and then the possibly-held set, and
 compensation removes what it actually released. `release` drains the ledger
-plus the standard set. The ledger is process-local by design — see the next
-section.
+plus the standard set. The ledger is process-local by design: the lease below
+orders two processes' batches, but it does not merge their ledgers, so one
+process still cannot see the keys the other may have left down.
 
 ## The orphaned-client finding
 
@@ -126,13 +134,74 @@ detached: true })` makes the batch a session and process-group leader, and
 timeout and abort tests assert the recorded client pid is gone, not merely
 that the call rejected.
 
+## The cross-process lease
+
+A second dsh process has its own FIFO and its own ledger. The lease is what
+stops the two from interleaving a click's press and release or a typed
+string; it lives in `src/lease.mjs` and the seat wraps every input run and
+every `release` sweep in it, including compensation.
+
+- **Where it lives.** The file is `lease-<32 hex>.lock` in a per-user
+  directory under the system temp dir (`leaseDir` overrides it), and the
+  name is a SHA-256 of the canonical target. It is deliberately *not* under
+  `XDG_RUNTIME_DIR` or beside the socket: the runtime dir is the live
+  session's own space, and a socket directory is not guaranteed writable;
+  the lock's name — not its directory — is what has to be per-socket. The
+  directory only has to be one that every dsh process for this user agrees
+  on; `leaseDir` pins it when `TMPDIR` differs between them.
+- **What the name names.** The canonical control-socket path when the seat
+  pins one (`socket`, or `VIEWPORT_SOCKET` in its environment). When neither
+  names a socket, the client itself discovers the session (`$XDG_RUNTIME_DIR`
+  plus `viewport-$WAYLAND_DISPLAY.sock`, else the newest `viewport-*.sock`
+  there), so the lease is scoped to the canonical runtime dir instead. That is
+  deliberately broader: two unpinned seats in one session still serialize
+  even though neither can say which socket the client will choose. A pinned
+  seat and an unpinned one cannot share a key; pin `socket` (or export
+  `VIEWPORT_SOCKET`) on both if that matters.
+- **What the record says.** The format version, the owner's pid, the owner's
+  process start time (`/proc/<pid>/stat` field 22, the same identity the
+  compositor uses for its clients), the boot id and PID namespace, a random
+  token, and the scope. It is written to a unique temp file and hard-linked
+  into place, so a reader sees either nothing or a complete record. On a
+  filesystem that cannot hard-link, an exclusive create is used instead and
+  the writer re-checks that the record at the path is still its own, so a
+  lease reclaimed under a stalled writer is not believed by that writer.
+- **When it may be reclaimed.** Only when the recorded identity is provably
+  dead: `/proc/<pid>/stat` is gone, the pid now names a process with a
+  different start time, or the recorded process is a zombie and will never
+  release. A stat that cannot be read (permissions, `hidepid`) is treated as
+  *unknown*, never dead, because stealing a live holder is worse than
+  waiting. Release tombstones are reclaimed at once and garbled files after
+  a one-second grace; reclamation is serialized by a guard file and re-checks
+  the exact bytes immediately before the unlink.
+- **How long it waits.** A live or unreadable holder is waited for up to
+  `leaseWaitMs` (30 s by default), interruptible by the call's abort signal.
+  Running out produces a `LeaseError` naming the holder, the lock file and
+  the time waited; the next call tries again. A call aborted while queued in
+  the FIFO never reaches the lease; a call already waiting for another
+  process's lease can be aborted and then spawns nothing.
+
+## What it does not buy
+
+The lease serializes input across processes. It does **not** make another
+process's stuck keys visible, and it does not merge ledgers: if process A is
+SIGKILLed with Ctrl held, process B's lease is reclaimed as soon as A is
+provably gone, but B never knew Ctrl was down. `release` still sweeps the
+standard modifier and button set, which may clear that particular key by
+accident, but an arbitrary stuck keysym is not something the lease can find.
+The lease is also advisory and dsh-specific: a client that does not look for
+the file is not stopped by it.
+
 ## What is *not* guaranteed
 
 | Case | What happens |
 | --- | --- |
 | dsh itself is **SIGKILLed** or the machine loses power | No compensation code runs. Keys or buttons pressed at that instant can stay down until the compositor or session ends. Nothing can fix this from inside a dead process. |
 | The compositor or its socket is **dead** when compensation runs | The release messages cannot land. The original error is still returned, the sentence names the inputs that could not be released, and the ledger keeps them; `release` retries them if the session comes back. The guarantee is best-effort, not absolute. |
-| A **second dsh process** drives the same socket | **Out of scope.** Each seat's FIFO serializes only its own calls, and each ledger knows only its own presses. Two processes can interleave input and neither can release the other's stuck keys. A shared per-socket lease or a compositor-side "release everything" would be the fix; it is deliberately not attempted here (follow-up). |
+| A **second dsh process** drives the same socket | Its batches no longer interleave with this process's (the lease above), but its ledger is still invisible here: if that process dies with an arbitrary key down, nothing on this side knows it. `release` sweeps the standard modifier/button set, not every key another process could have pressed. Two seats also only share a lease when they resolve the same target — pin `socket`/`VIEWPORT_SOCKET` or configure `leaseDir` alike on both. |
+| The lease holder is **SIGKILLed mid-batch** and its batch children survive | The lease is reclaimed as soon as the owner's identity is gone, but a `viewport msg` child that outlived its owner (or left its process group) can still be in flight. The seat kills its own batch group on timeout and abort; a SIGKILL of the dsh process itself is outside its control, so a new holder can start while such an orphan is on the wire. |
+| Two dsh processes share a lease directory across **different boots or PID namespaces** (a shared `/tmp` across containers, a `leaseDir` that survives a reboot, say) | The recorded pid and start time mean something else there, so the lease record carries its boot id and PID namespace and a holder from elsewhere is never called dead: the call waits out its bound and reports the lease file rather than stealing it. Delete the file once no process is using that session; a leftover lock from an earlier boot is never reclaimed automatically. |
+| Another tool (not dsh) writes to the same socket | The lease is advisory and only this plugin's processes look for it. It cannot order input from a client that ignores it. |
 | A client **leaves its process group** (double-fork plus `setsid`) | The group kill misses it. The stock `viewport msg` does not do this; the orphan check covers the normal case. |
 | A person is **physically holding** a modifier while `release` sweeps | The injected release clears the compositor's modifier state even though the physical key is still down (the later physical release is a no-op). `release` is the manual escape hatch and is meant for stuck input; ordinary compensation only releases inputs the plugin pressed. |
 | Screenshots overlap an input batch | Captures are not input and are not queued with it. A screenshot can observe a press/release window but cannot hold anything. |
@@ -151,7 +220,16 @@ modifier and button set, because that is what an escape hatch is for.
 The guarantees above are covered by `test/held.test.mjs` (the fold),
 `test/input-safety.test.mjs` (refusal at every message of every
 state-holding action shape, timeout with a recorded orphan pid, abort,
-queued abort, FIFO contiguity, `releaseAll`, and a refused compensation) and
-`test/release.test.mjs` (the action, schema, summary and idempotency). All
-of it runs against fake clients in temp directories; nothing touches the
-live session.
+queued abort, FIFO contiguity, `releaseAll`, and a refused compensation),
+`test/release.test.mjs` (the action, schema, summary and idempotency) and
+`test/lease.test.mjs` (procfs identity parsing, the lease held across a
+batch and across compensation, a queued abort never taking it, an abort
+during the lease wait, two real child processes contending on one socket,
+a SIGKILLed holder reclaimed, stale and garbled files, the bounded
+live-holder error, and two sockets not blocking each other). All of it runs
+against fake clients in temp directories, and the lease tests give every
+seat a private `leaseDir`; no message reaches the live session. The older
+suites build seats with no target, so their (fake) batches resolve the
+ambient session's socket as the lease *key*; the lock file still lands in
+the temp lease directory, and the client they run is a fake, not the
+compositor's.

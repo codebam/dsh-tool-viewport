@@ -30,6 +30,15 @@
  * how far the batch got; the message that was in flight is included
  * conservatively, because it may have been accepted before the kill.
  *
+ * The FIFO and the ledger stop at the edge of this process. A second dsh
+ * process driving the same socket has its own queue and its own ledger, so
+ * before a batch spawns its first message the seat takes a per-socket lease
+ * (`src/lease.mjs`) and gives it back after compensation, or after the batch
+ * settles. A call that is aborted while still queued never reaches the lease;
+ * a call that waits for another process's lease can be aborted while waiting.
+ * The lease is the second process's serialization only — it does not make
+ * that process's held keys visible here.
+ *
  * Every run goes through the plugin's one timeout. A batch gets the timeout
  * scaled by its message count, because the budget is per message, not per
  * batch: typing two hundred characters is four hundred invocations and a
@@ -44,6 +53,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
+import { acquireLease, DEFAULT_LEASE_WAIT_MS, resolveLeaseTarget } from './lease.mjs'
 import {
   describeInputs,
   heldAfter,
@@ -272,9 +282,22 @@ export class ViewportSeat {
 
   #base
 
+  #socket
+
+  #runtimeDir
+
+  #waylandDisplay
+
+  #leaseDir
+
+  #leaseWaitMs
+
   #timeoutMs
 
   #envOverrides
+
+  /** The resolved lease target, once; a second process's lease is shared through it. */
+  #leaseTarget
 
   /** The FIFO: every run and every release waits here, in call order. */
   #jobs = []
@@ -291,13 +314,20 @@ export class ViewportSeat {
    * @param {string} [options.runtimeDir] - `XDG_RUNTIME_DIR` override for a seat outside the session.
    * @param {string} [options.waylandDisplay] - the Wayland display to talk to when the environment's own is not the session ('wayland-1' for a seat outside the session).
    * @param {number} options.timeoutMs - per-message budget.
+   * @param {number} [options.leaseWaitMs] - how long a call waits for another process's input lease.
+   * @param {string} [options.leaseDir] - the directory holding per-socket lease files; it must be shared by every dsh process driving the session.
    */
-  constructor({ executable, socket, runtimeDir, waylandDisplay, timeoutMs }) {
+  constructor({ executable, socket, runtimeDir, waylandDisplay, timeoutMs, leaseWaitMs, leaseDir }) {
     this.#executable = executable
     // `msg` is the subcommand, not part of any message: without it the binary
     // starts a compositor instead of talking to one.
     this.#base = socket === undefined ? ['msg'] : ['msg', '--socket', socket]
+    this.#socket = socket
+    this.#runtimeDir = runtimeDir
+    this.#waylandDisplay = waylandDisplay
+    this.#leaseDir = leaseDir
     this.#timeoutMs = timeoutMs
+    this.#leaseWaitMs = Number.isFinite(leaseWaitMs) && leaseWaitMs >= 0 ? leaseWaitMs : DEFAULT_LEASE_WAIT_MS
     this.#envOverrides = {}
     if (runtimeDir !== undefined) this.#envOverrides.XDG_RUNTIME_DIR = runtimeDir
     if (waylandDisplay !== undefined) this.#envOverrides.WAYLAND_DISPLAY = waylandDisplay
@@ -407,6 +437,37 @@ export class ViewportSeat {
   /** How long one compensation release may take. */
   #compensationTimeout() {
     return Math.max(1, Math.min(this.#timeoutMs, COMPENSATION_CAP_MS))
+  }
+
+  /** The lease target for this seat's socket, resolved once; a failure is retried by the next call. */
+  #lease() {
+    if (this.#leaseTarget === undefined) {
+      this.#leaseTarget = resolveLeaseTarget({
+        socket: this.#socket,
+        runtimeDir: this.#runtimeDir,
+        waylandDisplay: this.#waylandDisplay,
+        leaseDir: this.#leaseDir,
+      }).catch((error) => {
+        this.#leaseTarget = undefined
+        throw error
+      })
+    }
+    return this.#leaseTarget
+  }
+
+  /**
+   * Take the per-socket lease another dsh process may be holding. A bounded
+   * wait that runs out, or a lease file that cannot be used, rejects with a
+   * clear error before any message is spawned; an abort while waiting is the
+   * tool's own `AbortError`.
+   */
+  async #takeLease(signal) {
+    try {
+      return await acquireLease(await this.#lease(), { signal, waitMs: this.#leaseWaitMs })
+    } catch (error) {
+      if (error?.name === 'AbortError') throw abortError()
+      throw error
+    }
   }
 
   /** One message through the client, as its own invocation. */
@@ -563,46 +624,58 @@ export class ViewportSeat {
     }
   }
 
-  /** One batch: run it, or compensate it and throw the shaped error. */
+  /** One batch: take the cross-process lease, run it, or compensate it and throw the shaped error; give the lease back last. */
   async #runBatch(messages, signal) {
     if (signal?.aborted) throw abortError()
-    const timeout = this.timeoutFor(messages.length)
+    // Acquired before the first message and released after compensation, so
+    // a second dsh process sees the batch as one contiguous run.
+    const lease = await this.#takeLease(signal)
     try {
-      await this.#invokeBatch(messages, signal, timeout)
-    } catch (failure) {
-      // Not a child failure (a bad message argument, say) or an abort before
-      // anything was spawned: there is nothing to compensate, and the
-      // original error is the truthful one.
-      if (failure?.kind === undefined || failure?.noProcess === true) throw failure
-      if (failure.kind === 'spawn') throw this.#shape(failure, timeout)
-      const { held, prefix } = this.#heldForFailure(messages, failure)
-      this.#applyMessages(prefix)
-      for (const input of held) this.#remember(input)
-      const report = await this.#compensate(held)
-      const error = this.#shape(failure, timeout)
-      error.message = `${error.message} ${compensationSentence(report)}`
-      throw error
+      const timeout = this.timeoutFor(messages.length)
+      try {
+        await this.#invokeBatch(messages, signal, timeout)
+      } catch (failure) {
+        // Not a child failure (a bad message argument, say) or an abort before
+        // anything was spawned: there is nothing to compensate, and the
+        // original error is the truthful one.
+        if (failure?.kind === undefined || failure?.noProcess === true) throw failure
+        if (failure.kind === 'spawn') throw this.#shape(failure, timeout)
+        const { held, prefix } = this.#heldForFailure(messages, failure)
+        this.#applyMessages(prefix)
+        for (const input of held) this.#remember(input)
+        const report = await this.#compensate(held)
+        const error = this.#shape(failure, timeout)
+        error.message = `${error.message} ${compensationSentence(report)}`
+        throw error
+      }
+      this.#applyMessages(messages)
+    } finally {
+      await lease.release()
     }
-    this.#applyMessages(messages)
   }
 
-  /** The `release` action's work, serialized with every run. */
+  /** The `release` action's work, serialized with every run and with other processes. */
   async #releaseNow(signal) {
-    const known = [...this.#ledger.values()]
-    const released = []
-    const failed = []
-    for (const input of releasePlan(known)) {
-      if (signal?.aborted) throw abortError()
-      try {
-        await this.#invoke(releaseMessage(input), signal, this.#timeoutMs)
-        released.push(input)
-        this.#ledger.delete(inputKey(input))
-      } catch (error) {
-        if (error?.noProcess === true || error?.kind === 'abort') throw abortError()
-        failed.push({ input, reason: this.#reason(error) })
+    const lease = await this.#takeLease(signal)
+    try {
+      const known = [...this.#ledger.values()]
+      const released = []
+      const failed = []
+      for (const input of releasePlan(known)) {
+        if (signal?.aborted) throw abortError()
+        try {
+          await this.#invoke(releaseMessage(input), signal, this.#timeoutMs)
+          released.push(input)
+          this.#ledger.delete(inputKey(input))
+        } catch (error) {
+          if (error?.noProcess === true || error?.kind === 'abort') throw abortError()
+          failed.push({ input, reason: this.#reason(error) })
+        }
       }
+      return { known, released, failed }
+    } finally {
+      await lease.release()
     }
-    return { known, released, failed }
   }
 
   /** Map a child-process failure onto the error the model reads. */

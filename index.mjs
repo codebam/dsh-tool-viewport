@@ -42,6 +42,10 @@ export const Config = z.object({
   waylandDisplay: z.string(),
   /** Where captures are written. Defaults to a directory under the temp dir; the model sees the path in every screenshot result. */
   screenshotDir: z.string(),
+  /** How long one input call waits for another dsh process's lease on the same socket before failing. */
+  leaseWaitMs: z.number().default(30000),
+  /** The directory holding per-socket lease files. Every dsh process driving the same session must use the same one; defaults to a per-user directory under the system temp dir. */
+  leaseDir: z.string(),
   /** Per-message budget in milliseconds. A batch of messages (typing) scales this by its size, bounded at five minutes. */
   timeoutMs: z.number().default(10000),
 })
@@ -55,6 +59,7 @@ export function apply(ctx, config = {}) {
   const executable = config.executable ?? 'viewport'
   const grim = config.grim ?? 'grim'
   const timeoutMs = config.timeoutMs ?? 10000
+  const leaseWaitMs = config.leaseWaitMs ?? 30000
   if (typeof executable !== 'string' || executable.trim().length === 0) {
     throw new Error('tool-viewport: executable must be a non-empty string')
   }
@@ -64,12 +69,20 @@ export function apply(ctx, config = {}) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error(`tool-viewport: timeoutMs must be a positive number, got ${JSON.stringify(config.timeoutMs)}`)
   }
+  if (!Number.isFinite(leaseWaitMs) || leaseWaitMs < 0) {
+    throw new Error(`tool-viewport: leaseWaitMs must be a non-negative number, got ${JSON.stringify(config.leaseWaitMs)}`)
+  }
+  if (config.leaseDir !== undefined && (typeof config.leaseDir !== 'string' || config.leaseDir.trim().length === 0)) {
+    throw new Error('tool-viewport: leaseDir must be a non-empty string')
+  }
   const seat = new ViewportSeat({
     executable,
     socket: config.socket,
     runtimeDir: config.runtimeDir,
     waylandDisplay: config.waylandDisplay,
     timeoutMs,
+    leaseWaitMs,
+    leaseDir: config.leaseDir,
   })
   const screenshotDir = config.screenshotDir ?? defaultScreenshotDir()
   const capture = ({ signal }) => captureScreenshot({

@@ -25,11 +25,17 @@ The tool's description tells the model the same thing the rest of this
 document tells you: this drives the session a person is sitting at, so
 `screenshot` first, act on what the image shows, screenshot again to check.
 
-Input calls are serialized through one FIFO queue, and a call that fails or
+Input calls are serialized through one FIFO queue inside a dsh process, and
+across dsh processes that resolve the same socket and lease directory through
+a per-socket lease: a second process waits its turn (abortably), and a lease
+left behind by a crashed holder is reclaimed once its pid and process start
+time prove it is gone. A call that fails or
 is cancelled part-way releases the keys and buttons it had pressed before
 the error comes back. What that does and does not guarantee — timeouts,
-aborts, queued cancellation, `release`, and the cases that are deliberately
-out of scope (SIGKILL, a dead compositor, a second dsh process) — is in
+aborts, queued cancellation, `release`, the lease's blind spot (it orders
+batches but cannot see another process's stuck keys), and the cases that
+are deliberately out of scope (SIGKILL, a dead compositor, an unrelated
+client that ignores the lease) — is in
 [`docs/input-safety.md`](docs/input-safety.md).
 
 ## Requirements
@@ -62,6 +68,8 @@ The tool reads one config object (all optional):
 | `runtimeDir` | — | `XDG_RUNTIME_DIR` override, for a harness outside the session. |
 | `waylandDisplay` | — | The Wayland display to talk to, e.g. `wayland-1`, for a harness outside the session (grim and the client both need it). |
 | `screenshotDir` | temp dir | Where captures are written; the model sees the path in every screenshot result. |
+| `leaseWaitMs` | `30000` | How long one input call waits for another dsh process's lease on the same socket before failing with a `LeaseError`. |
+| `leaseDir` | per-user temp dir | The directory holding per-socket lease files. Every dsh process driving the same session must use the same one; set it when their `TMPDIR`s differ. |
 | `timeoutMs` | `10000` | Per-message budget; a batch scales it by message count, capped at five minutes. |
 
 ## Mounting it
@@ -101,8 +109,9 @@ The batch runs in its own process group, so a timeout or abort kills the
 whole tree rather than just the shell, and a progress marker records how
 many messages completed. Compensation then releases exactly what the batch
 had pressed, last press first, each release as its own `viewport msg`; the
-error says what was released (or that nothing was held). See
-[`docs/input-safety.md`](docs/input-safety.md).
+error says what was released (or that nothing was held). The batch runs
+under a per-socket lease, so a second dsh process cannot interleave with it.
+See [`docs/input-safety.md`](docs/input-safety.md).
 
 Typing and key chords go through the `osk.key` path — every key down and
 up as its own message, exactly the sequence the shell's on-screen keyboard
@@ -118,7 +127,8 @@ index.mjs              the Cordis plugin entry: config schema, service wiring, s
 src/messages.mjs       control-message building (`-t <type>` plus fields per action)
 src/keys.mjs           text and chords to keystrokes (the osk.js mapping)
 src/held.mjs           held-key/button accounting over a message list; release planning
-src/seat.mjs           FIFO queue, process groups, compensation, batch scripts, error shaping
+src/lease.mjs          per-socket cross-process lease: identity, stale reclaim, bounded wait
+src/seat.mjs           FIFO queue, lease, process groups, compensation, batch scripts, error shaping
 src/shot.mjs           grim capture, PNG sizing, screenshot naming
 src/render.mjs         model-facing summaries (screenshot envelope matches read_image's)
 src/tool.mjs           the `viewport` tool definition (schema, validation, execution)
@@ -131,9 +141,10 @@ packaging/nixos/       the NixOS packaging
 
 ## Testing
 
-- `node --test` — the unit suites (89 tests). No session, no compositor:
-  fake clients stand in for `viewport msg` and grim, including the
-  refusable/hanging/slow clients behind the input-safety tests.
+- `node --test` — the unit and process-level suites (109 tests). No session,
+  no compositor: fake clients stand in for `viewport msg` and grim, including
+  the refusable/hanging/slow clients behind the input-safety tests and the
+  real child processes that contend for one lease.
 - `scripts/headless-smoke.sh` — the real thing, against a throwaway
   `viewport --headless` instance: starts it, then runs the same modules
   end to end (`move`, `click`, `scroll`, `type`, `key`, `screenshot` with
