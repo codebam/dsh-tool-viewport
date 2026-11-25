@@ -1,6 +1,6 @@
 {
   "name": "@codebam/dsh-tool-viewport",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Model-facing `viewport` tool for the DeepSeek Harness: screenshot, pointer, wheel and keyboard control of a live Viewport session through its control socket.",
   "keywords": [
     "deepseek-harness",
