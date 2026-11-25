@@ -9,10 +9,10 @@ stdenvNoCC.mkDerivation {
   pname = "dsh-tool-viewport";
   version = "0.3.0";
 
-  # @codebam/dsh-tool-viewport is published from its own repository; this
-  # host pins the reviewed revision so the profile copies exactly the plugin
-  # sources it was tested with. The hash is the pushed tag's unpacked-tree
-  # hash, computed with:
+  # @codebam/dsh-tool-viewport is distributed from this repository by tag,
+  # not through a package registry; this host pins the reviewed revision so
+  # the profile copies exactly the plugin sources it was tested with. The
+  # hash is the pushed tag's unpacked-tree hash, computed with:
   #   nix-prefetch-url --unpack https://github.com/codebam/dsh-tool-viewport/archive/refs/tags/v0.3.0.tar.gz
   # then `nix hash to-sri` the result into `hash` below
   # (or set it from nix-build's reported expected hash).
@@ -25,7 +25,7 @@ stdenvNoCC.mkDerivation {
 
   nativeBuildInputs = [ nodejs ];
 
-  # The published files are the ESM sources; there is no build step.
+  # The shipped files are the ESM sources; there is no build step.
   dontBuild = true;
 
   # home/agents.nix copies this directory into $DSH_HOME next to the profile's
