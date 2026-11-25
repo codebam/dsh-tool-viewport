@@ -1,0 +1,90 @@
+# One job: the suite is plain `node --test` over ESM sources, so the runner
+# needs Node and the plugin's four peer packages and nothing else.
+#
+# `npm ci` would not help here. package.json declares no dependencies and no
+# devDependencies, and there is no lockfile to install from. The four
+# @deepseek-ai packages are optional peerDependencies, resolved from the
+# installed dsh when dsh loads the plugin. Locally `scripts/link-dsh-peers.mjs`
+# symlinks the running dsh's peer set into node_modules; a hosted runner has
+# no dsh, so the install step below fetches the same published versions from
+# npm with `--no-save` (package.json is not modified, and no lockfile is
+# written).
+#
+# The tests import those peers directly, so this workflow cannot honestly run
+# the suite without them:
+#
+#   index.mjs                                 -> @deepseek-ai/schemastery
+#   src/tool.mjs, src/seat.mjs, src/shot.mjs  -> @deepseek-ai/dsh-tools
+#   src/seat.mjs, src/shot.mjs                -> @deepseek-ai/dsh-llm
+#
+# If the install fails, the job fails. If a peer is missing anyway, the verify
+# step names which one instead of letting a test file die with a bare
+# ERR_MODULE_NOT_FOUND. Nothing here reports a pass that did not run 109 tests.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# The job reads the repository and npm, nothing more.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      # Cheapest first: `node --check` parses the sources without resolving an
+      # import, so a syntax error reports in seconds, before any network work,
+      # and on a checkout whose node_modules does not exist yet.
+      - name: Check syntax
+        run: npm run check
+
+      # Exact versions, not the `*` the peerDependencies declare: these are
+      # what this checkout is developed and tested against (the dsh
+      # 0.2.2-rc.2 closure; cordis and schemastery are its current releases).
+      # A `*` would let a future dsh release reach CI without a commit here;
+      # the pin makes that an explicit bump, and is the CI counterpart of
+      # `npm run peers`.
+      - name: Install the dsh peers
+        run: |
+          set -euo pipefail
+          npm install --no-save --no-package-lock --no-audit --no-fund \
+            @deepseek-ai/dsh-tools@0.2.2-rc.2 \
+            @deepseek-ai/dsh-llm@0.2.2-rc.2 \
+            @deepseek-ai/cordis@4.1.0 \
+            @deepseek-ai/schemastery@3.19.0
+
+      # A missing peer otherwise surfaces as ERR_MODULE_NOT_FOUND from inside
+      # one test file, which reads like a code break rather than a toolchain
+      # problem. Name the package and fail.
+      - name: Verify the peers resolve
+        run: |
+          node --input-type=module <<'NODE'
+            const peers = [
+              '@deepseek-ai/dsh-tools',
+              '@deepseek-ai/dsh-llm',
+              '@deepseek-ai/schemastery',
+              '@deepseek-ai/cordis',
+            ]
+            for (const peer of peers) {
+              try {
+                await import(peer)
+              } catch (error) {
+                console.error(`peer ${peer} did not install: ${error.message}`)
+                process.exit(1)
+              }
+            }
+          NODE
+
+      # 109 tests. No session and no compositor: fake clients stand in for
+      # `viewport msg` and grim, and every test uses private temp directories.
+      - name: Tests
+        run: node --test
